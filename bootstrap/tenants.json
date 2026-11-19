@@ -1,0 +1,51 @@
+{
+  "_comment": "members: people who may see this team (or, on an org, all its teams) in Grafana + Langfuse - locally created with a password, in production matched by email/SSO. Edit this file, then run: ./scripts/apply-tenants.sh. Safe to re-run: teams, budgets and key limits are re-applied; existing keys are never re-issued. Naming rules: see NAMING.md. Key limits: max_budget ($ per budget_duration), rpm_limit (requests/min), tpm_limit (tokens/min). Dev keys get small limits so a loop cannot drain the team budget.",
+  "orgs": [
+    {
+      "alias": "org-engineering",
+      "teams": [
+        {
+          "alias": "team-search",
+          "members": [{"login": "u1", "name": "U1"}],
+          "max_budget": 500,
+          "budget_duration": "1mo",
+          "models": ["mock-gpt-4o-mini", "gpt-oss-120b", "gpt-oss-20b"],
+          "keys": [
+            { "alias": "search-chatbot-prod", "tags": ["proj:chatbot", "cc:1042", "env:prod"],
+              "max_budget": 400, "budget_duration": "1mo", "rpm_limit": 120, "tpm_limit": 200000 },
+            { "alias": "search-chatbot-dev",  "tags": ["proj:chatbot", "cc:1042", "env:dev"],
+              "max_budget": 25,  "budget_duration": "1mo", "rpm_limit": 20,  "tpm_limit": 20000 }
+          ]
+        },
+        {
+          "alias": "team-ranking",
+          "members": [{"login": "u2", "name": "U2"}],
+          "max_budget": 200,
+          "budget_duration": "1mo",
+          "models": ["mock-gpt-4o-mini", "gpt-oss-20b"],
+          "keys": [
+            { "alias": "ranking-reranker-prod", "tags": ["proj:reranker", "cc:1042", "env:prod"],
+              "max_budget": 200, "budget_duration": "1mo", "rpm_limit": 120, "tpm_limit": 200000 }
+          ]
+        }
+      ]
+    },
+    {
+      "alias": "org-legal",
+      "teams": [
+        {
+          "alias": "team-contracts",
+          "members": [{"login": "u3", "name": "U3"}],
+          "max_budget": 300,
+          "budget_duration": "1mo",
+          "models": ["mock-gpt-4o-mini", "qwen3.8-27b", "gpt-oss-120b"],
+          "sensitive": true,
+          "keys": [
+            { "alias": "contracts-reviewer-prod", "tags": ["proj:reviewer", "cc:2210", "env:prod"],
+              "max_budget": 300, "budget_duration": "1mo", "rpm_limit": 60, "tpm_limit": 100000 }
+          ]
+        }
+      ]
+    }
+  ]
+}

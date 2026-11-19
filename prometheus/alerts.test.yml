@@ -1,0 +1,114 @@
+# Unit tests for alerts.yml.  Run:  scripts/test-alerts.sh
+rule_files:
+  - alerts.yml
+evaluation_interval: 30s
+
+tests:
+  - name: budget above 80% fires, below does not
+    interval: 1m
+    input_series:
+      - series: 'litellm_team_max_budget_metric{team="t1",team_alias="team-search"}'
+        values: '500x20'
+      - series: 'litellm_remaining_team_budget_metric{team="t1",team_alias="team-search"}'
+        values: '50x20'      # 90% used
+      - series: 'litellm_team_max_budget_metric{team="t2",team_alias="team-ranking"}'
+        values: '200x20'
+      - series: 'litellm_remaining_team_budget_metric{team="t2",team_alias="team-ranking"}'
+        values: '150x20'     # 25% used
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TeamBudgetAbove80Percent
+        exp_alerts:
+          - exp_labels: { severity: warning, team: t1, team_alias: team-search }
+            exp_annotations:
+              summary: "team-search has used 90% of its budget"
+              description: "Team team-search is above 80% of its max budget for the current period. Requests are blocked at 100%."
+
+  - name: budget alert fires once with two LiteLLM instances reporting
+    interval: 1m
+    input_series:
+      - series: 'litellm_team_max_budget_metric{team="t1",team_alias="team-search",instance="10.0.0.1:4000"}'
+        values: '500x20'
+      - series: 'litellm_team_max_budget_metric{team="t1",team_alias="team-search",instance="10.0.0.2:4000"}'
+        values: '500x20'
+      - series: 'litellm_remaining_team_budget_metric{team="t1",team_alias="team-search",instance="10.0.0.1:4000"}'
+        values: '50x20'
+      - series: 'litellm_remaining_team_budget_metric{team="t1",team_alias="team-search",instance="10.0.0.2:4000"}'
+        values: '60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TeamBudgetAbove80Percent
+        exp_alerts:
+          - exp_labels: { severity: warning, team: t1, team_alias: team-search }
+            exp_annotations:
+              summary: "team-search has used 90% of its budget"
+              description: "Team team-search is above 80% of its max budget for the current period. Requests are blocked at 100%."
+
+  - name: error rate spike fires
+    interval: 1m
+    input_series:
+      # 2 req/s total, 0.4 req/s failing = 20% errors
+      - series: 'litellm_proxy_total_requests_metric_total{team_alias="team-search",route="/chat/completions"}'
+        values: '0+120x20'
+      - series: 'litellm_proxy_failed_requests_metric_total{team_alias="team-search",route="/chat/completions"}'
+        values: '0+24x20'
+      # metrics-scrape failures must be ignored
+      - series: 'litellm_proxy_failed_requests_metric_total{team_alias="None",route="/metrics/"}'
+        values: '0+600x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LiteLLMErrorRateHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, team_alias: team-search }
+            exp_annotations:
+              summary: "Error rate for team-search is 20%"
+              description: "More than 5% of requests are failing. Check the LiteLLM logs and the Live dashboard's error panel (exception_class tells you why)."
+
+  - name: expired UI login (401s on admin routes) does not page
+    interval: 1m
+    input_series:
+      # healthy model traffic for team-search
+      - series: 'litellm_proxy_total_requests_metric_total{team_alias="team-search",route="/chat/completions"}'
+        values: '0+120x20'
+      - series: 'litellm_proxy_failed_requests_metric_total{team_alias="team-search",route="/chat/completions"}'
+        values: '0+0x20'
+      # a browser tab with a stale UI session hammering admin routes
+      - series: 'litellm_proxy_total_requests_metric_total{team_alias="None",route="/v2/team/list"}'
+        values: '0+60x20'
+      - series: 'litellm_proxy_failed_requests_metric_total{team_alias="None",route="/v2/team/list"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LiteLLMErrorRateHigh
+        exp_alerts: []
+
+  - name: low traffic does not page
+    interval: 1m
+    input_series:
+      # 50% errors but only ~0.03 req/s
+      - series: 'litellm_proxy_total_requests_metric_total{team_alias="team-ranking",route="/chat/completions"}'
+        values: '0+2x20'
+      - series: 'litellm_proxy_failed_requests_metric_total{team_alias="team-ranking",route="/chat/completions"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: LiteLLMErrorRateHigh
+        exp_alerts: []
+
+  - name: p95 latency high fires
+    interval: 1m
+    input_series:
+      - series: 'litellm_request_total_latency_metric_bucket{model_group="gpt-4o",le="10"}'
+        values: '0+1x30'
+      - series: 'litellm_request_total_latency_metric_bucket{model_group="gpt-4o",le="60"}'
+        values: '0+10x30'
+      - series: 'litellm_request_total_latency_metric_bucket{model_group="gpt-4o",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LiteLLMLatencyP95High
+        exp_alerts:
+          - exp_labels: { severity: warning, model_group: gpt-4o }
+            exp_annotations:
+              summary: "p95 latency for gpt-4o is 57.22s"
+              description: "End-to-end request latency (proxy + provider) p95 is above 30s for 10 minutes."

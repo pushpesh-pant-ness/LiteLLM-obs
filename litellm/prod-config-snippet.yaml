@@ -1,0 +1,37 @@
+# Add this to the PRODUCTION LiteLLM config (attach mode). Merge into the existing sections -
+# do not replace them. scripts/setup.sh --check tells you whether it is already in place.
+#
+# 1. Copy litellm/redact_reasoning.py next to the production config.yaml (same directory LiteLLM
+#    imports the config from, e.g. /app/redact_reasoning.py) - in Docker:
+#        volumes:
+#          - ./redact_reasoning.py:/app/redact_reasoning.py:ro
+# 2. Merge the settings below, restart LiteLLM (rolling, one replica at a time).
+# 3. Every replica must be reachable from the observability server on its own port (Prometheus
+#    scrapes each one: setup.yml litellm.metrics.targets), and LiteLLM must reach Langfuse at
+#    setup.yml server.langfuse_url_for_litellm (traces are pushed there).
+#
+# Nothing else changes in production: teams, budgets, models and keys stay as they are
+# (setup.yml litellm.tenants: observe). Per-team trace routing and redaction are set on each team
+# through the admin API by scripts/apply-tenants.sh - not in this file.
+
+litellm_settings:
+  # prometheus: metrics for Grafana "Live" + alerts.
+  # redact_reasoning: for teams marked sensitive, also blanks model *reasoning* text (Groq gpt-oss
+  # copies the prompt into it and LiteLLM's own redaction misses that field). Apps still get the
+  # full response; only what is logged changes.
+  callbacks: ["prometheus", "redact_reasoning.proxy_handler_instance"]
+
+  # Keep Prometheus label cardinality low (no per-user / per-request labels).
+  disable_end_user_cost_tracking_prometheus_only: true
+  prometheus_exclude_labels: ["client_ip", "user_agent", "user_email", "end_user", "user", "hashed_api_key"]
+
+  # Optional, recommended: spend tags stay proj/cc/env instead of every client's User-Agent.
+  disable_add_user_agent_to_request_tags: true
+
+  # Do NOT add a global Langfuse *failure* callback: requests rejected at auth (wrong model, budget,
+  # rate limit) are logged before team settings apply, so a sensitive team's prompt would reach
+  # Langfuse unredacted. Each team gets its own success+failure Langfuse callback instead.
+  #   failure_callback: []      # leave langfuse out of it
+
+# /metrics needs a key by default in current releases (require_auth_for_metrics_endpoint). apply-tenants.sh
+# creates a key that may only call /metrics (alias infra-prometheus-scraper-prod) for Prometheus.
