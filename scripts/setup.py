@@ -445,6 +445,19 @@ def cmd_preflight():
     report(any("redact_reasoning" in n for n in names), "LiteLLM has the reasoning-redaction hook",
            "" if any("redact_reasoning" in n for n in names) else
            "needed for sensitive teams on reasoning models - see litellm/prod-config-snippet.yaml", warn=True)
+    s, b = http("GET", url + "/coordination_redis/settings", key)
+    if s == 200 and isinstance(b, dict):
+        src = b.get("source")
+        n = len(env["METRICS_TARGETS"].split(","))
+        report(bool(src) or n < 2, "LiteLLM replicas share a Redis (coordination_redis)",
+               f"source: {src}" + ("" if src == "coordination_redis" else
+                                   " - set general_settings.coordination_redis (litellm/prod-config-snippet.yaml)")
+               if src else f"none - {n} replicas count rate limits and budgets separately", warn=True)
+        if src and src != "coordination_redis":
+            print("  WARN  coordination Redis comes from the REDIS_* env fallback - works, but set "
+                  "general_settings.coordination_redis so it is explicit (litellm/prod-config-snippet.yaml)")
+    else:
+        report(False, "LiteLLM coordination Redis visible", f"HTTP {s} (older LiteLLM?) - check its Redis settings by hand", warn=True)
     for t in env["METRICS_TARGETS"].split(","):
         host, port = hostport(t, 4000)
         try:

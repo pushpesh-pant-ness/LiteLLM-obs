@@ -33,5 +33,16 @@ litellm_settings:
   # Langfuse unredacted. Each team gets its own success+failure Langfuse callback instead.
   #   failure_callback: []      # leave langfuse out of it
 
+# Several replicas MUST share one Redis, or each counts rate limits / budgets on its own (limits
+# multiply by the number of replicas). LiteLLM 1.10x+: the dedicated block below; the REDIS_* env
+# vars alone are only a fallback (UI > Redis settings then shows "source: environment", empty).
+# scripts/setup.sh --check warns when production has no coordination Redis.
+general_settings:
+  coordination_redis:
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
+  use_redis_transaction_buffer: true      # spend updates queued in Redis: replicas don't fight over DB rows
+
 # /metrics needs a key by default in current releases (require_auth_for_metrics_endpoint). apply-tenants.sh
 # creates a key that may only call /metrics (alias infra-prometheus-scraper-prod) for Prometheus.

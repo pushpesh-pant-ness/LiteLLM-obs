@@ -46,6 +46,14 @@ general_settings:
   maximum_spend_logs_retention_interval: "1d"
   # Several LiteLLM instances: queue spend updates in Redis so instances don't fight over DB rows.
   use_redis_transaction_buffer: true
+  # The Redis ALL instances share for cross-instance coordination: rpm/tpm limits, spend
+  # tracking (transaction buffer above), pod lock manager, shared health checks. Without this
+  # block LiteLLM only falls back to the REDIS_* env vars ("source: environment" in the UI's
+  # Redis settings, which then shows empty fields). Service litellm-redis.
+  coordination_redis:
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
 
 # Shared state for ALL LiteLLM instances (service litellm-redis): rate limits, budgets between DB
 # writes, provider cooldowns. Without it every instance counts on its own and limits multiply.

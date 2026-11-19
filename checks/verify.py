@@ -195,6 +195,18 @@ else:
     record("ha", "failing model falls back to the next model", fell_back, f"HTTP {s}" + ("" if fell_back else f": {str(b)[:120]}"))
 section("LiteLLM configuration (continued)")
 
+# Guards: instances not sharing Redis (limits multiply by instance count), or Redis only via the
+# REDIS_* env fallback (the UI's Redis settings look empty and it is easy to "fix" it wrongly).
+s, cr = litellm("GET", "/coordination_redis/settings")
+src = cr.get("source") if isinstance(cr, dict) else None
+if s != 200:
+    record("config", "coordination Redis configured", None, f"HTTP {s} - endpoint not in this LiteLLM version")
+elif ATTACH:
+    record("config", "production LiteLLM has a coordination Redis", bool(src), f"source: {src}")
+else:
+    record("config", "coordination Redis set in config.yaml (general_settings.coordination_redis)",
+           src == "coordination_redis", f"source: {src}")
+
 try:
     scraper = open(SCRAPER_TOKEN, encoding="utf-8").read().strip()
 except FileNotFoundError:
