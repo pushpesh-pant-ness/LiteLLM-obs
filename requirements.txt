@@ -1,0 +1,20 @@
+# Python packages used by this project's code.
+#
+# You do NOT need these to run the gateway: run.ps1 / run.sh execute every tool inside the LiteLLM
+# Docker image, which already contains them. Install them only to work on the code locally
+# (IDE autocomplete, type checking, linting, running tools/render.py outside Docker):
+#
+#   python -m venv .venv
+#   .venv\Scripts\activate          (Git Bash / Linux / macOS: source .venv/bin/activate)
+#   pip install -r requirements.txt
+#
+# System requirements (Docker, RAM, disk, ports): README.md > Requirements.
+
+# tools/render.py, tools/provision.py, tools/selftest.py - config files are YAML
+PyYAML>=6.0
+
+# gateway/hooks/*.py - hooks subclass LiteLLM's CustomLogger and raise fastapi.HTTPException.
+# Keep the litellm pin equal to the version the stack runs (config/stack.yaml, images.lock).
+# (Not litellm[proxy]: that extra pulls the whole proxy server, which the hooks don't need.)
+litellm==1.111.0
+fastapi>=0.115

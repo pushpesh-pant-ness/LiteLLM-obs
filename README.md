@@ -19,30 +19,111 @@ Apps ──► LiteLLM ×2 (:4000, :4001) ────────────�
 
 All data stays on local Docker volumes. Everything the stack needs is in this folder.
 
-## Quick start
+## Requirements
 
-1. Docker Desktop running (Compose v2).
-2. Start everything (Windows):
+| What | Needed | Notes |
+|---|---|---|
+| Docker | Docker Desktop (Windows / macOS) or Docker Engine (Linux) with **Compose v2** | Tested with Compose 5.5.1. Must be running before you start. |
+| Memory for Docker | **8 GB or more** | About 4.2 GB in use with 2 LiteLLM replicas; the container limits add up to about 12.6 GB. Docker Desktop: *Settings > Resources*. |
+| Disk | about **12 GB** free | Images about 10 GB (LiteLLM alone 3.2 GB), data grows with traffic. |
+| Shell | Windows PowerShell 5.1+ / PowerShell 7, **or** bash (Git Bash, Linux, macOS) | `run.ps1` and `run.sh` do the same thing. |
+| Free ports | 4000, 4001, 3000, 3001, 9090 | Change them in `config/ports.yaml` if any is taken. |
+| Network | Access to `ghcr.io` and Docker Hub (images), and to the provider APIs | Behind TLS inspection (Netskope), see [step 2](#step-2-corporate-network-only-tls-inspection-certificate). |
+| Provider keys | At least one of Groq, Gemini, OpenRouter | Without any key, only the free `selftest-mock` model works. |
+| Python | **Not needed** | Every tool runs inside the LiteLLM container. `requirements.txt` is only for working on the code locally (IDE autocomplete, linting). |
 
-   ```powershell
-   .\run.ps1
-   ```
+## Getting started (step by step)
 
-   Git Bash / Linux / macOS: `./run.sh`. If PowerShell blocks scripts:
-   `powershell -ExecutionPolicy Bypass -File .\run.ps1`.
+### Step 1: Open the project folder
 
-3. On the first run `.env` is created with every password, secret and team key generated. Add your
-   provider keys to it (`GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`), then run
-   `.\run.ps1` again: the models of those providers are added and granted to their teams.
-4. Check it end to end:
+```powershell
+cd "<path>\LiteLLM-obs"
+```
 
-   ```powershell
-   .\run.ps1 test
-   ```
+Every command below runs from this folder. If you copy the project to another machine, copy the
+whole folder, including `.env` and `certs/*.pem` if you already have them.
 
-One command does the whole build-and-run: validate `config/`, fill `.env`, generate the LiteLLM /
-Prometheus / Grafana config, pull the images, start the containers, wait until they are healthy,
-then provision teams, keys and Langfuse projects. It is idempotent: re-run it after any change.
+### Step 2: Corporate network only: TLS inspection certificate
+
+If your network re-signs HTTPS traffic (Netskope here), LiteLLM cannot reach the providers
+without the corporate CA. Put the corporate root CA, as PEM, at `certs/corp-root-ca.pem`, and the
+intermediate at `certs/corp-intermediate-ca.pem`. The runner then builds `certs/ca-bundle.pem` on
+every run. How to export them: [certs/README.md](certs/README.md). On a normal network, skip this step.
+
+### Step 3: Create `.env` and add your credentials
+
+```powershell
+Copy-Item .env.example .env
+```
+
+(Or skip the copy: the first `.\run.ps1` creates `.env` from the template.) Then open `.env` in
+an editor and set:
+
+| Variable | Set it to | Required? |
+|---|---|---|
+| `GROQ_API_KEY` | key from https://console.groq.com/keys | for `gpt-oss-120b`, `gpt-oss-20b`, `qwen3.8-27b` |
+| `GEMINI_API_KEY` | key from https://aistudio.google.com/apikey | for `gemini-3.6-flash`, `gemini-embedding-001` |
+| `OPENROUTER_API_KEY` | key from https://openrouter.ai/settings/keys | for the OpenRouter fallback of the gpt-oss models |
+| `LANGFUSE_ADMIN_EMAIL` | your e-mail (the Langfuse login) | recommended (default `admin@example.com`) |
+| `LITELLM_UI_USERNAME`, `GRAFANA_ADMIN_USER` | admin user names | optional (default `admin`) |
+| anything marked *(auto)* | **leave empty** | generated on the first run |
+| `KEY_<TEAM>_<KEY>` lines | **do not add by hand** | appended automatically for every key in `config/teams.yaml` |
+
+Rules for `.env`:
+
+- One `NAME=value` per line, with no quotes and no spaces around `=`.
+- Comments go on their own line.
+- Values must not contain `'` or `$`.
+- Never commit this file (it is git-ignored).
+
+You may set your own passwords before the first run. After the first start, don't change the
+values marked *(fixed)*: they are stored in the databases.
+
+### Step 4: Review the configuration (optional)
+
+The defaults work as they are. Change them only if you need to:
+
+| File | Change it when you want to... |
+|---|---|
+| `config/teams.yaml` | rename the org, add / remove teams, change a team's models, budgets, rate limits or keys |
+| `config/models.yaml` | add a model or provider route, change fallbacks or prices |
+| `config/ports.yaml` | move a service to another port (e.g. a port is already in use) |
+| `config/stack.yaml` | expose on the network (`bind: 0.0.0.0`), change replicas, cache TTL, image tags / pull policy |
+| `config/hooks.yaml` | turn hooks on / off, add a new hook |
+
+### Step 5: Build and run, with one command
+
+```powershell
+.\run.ps1
+```
+
+Git Bash / Linux / macOS: `./run.sh`. If PowerShell refuses to run scripts:
+`powershell -ExecutionPolicy Bypass -File .\run.ps1`.
+
+The runner goes through 6 steps and stops with a clear message if something is wrong:
+
+1. **config**: validates `config/*.yaml` and `.env`, fills empty secrets and team keys, and writes `.build/`
+2. **images**: pulls the images of `config/stack.yaml`, and records their digests in `images.lock`
+3. **start**: `docker compose up` for all 13 services
+4. **health**: waits until LiteLLM (each replica), Langfuse, Grafana and Prometheus answer
+5. **provision**: creates or updates teams, team keys, the Langfuse project per team, and the metrics key
+6. **ready**: prints the URLs and which `.env` variable holds each login
+
+The first run takes about 5–10 minutes (image download); later runs about 1–2 minutes. It is
+safe to re-run at any time, and re-running is how every change is applied.
+
+### Step 6: Check that everything works
+
+```powershell
+.\run.ps1 test
+```
+
+It must end with `N passed, 0 failed`. It makes one real call (max 16 tokens) per provider
+model. If a line says `FAIL`, its message names the cause, e.g. `API key expired` means the
+provider key in `.env` must be replaced. See [Self-test](#self-test) and
+[Troubleshooting](#troubleshooting).
+
+### Step 7: Open the UIs and hand out the team keys
 
 | URL | What | Login (values in `.env`) |
 |---|---|---|
@@ -52,7 +133,15 @@ then provision teams, keys and Langfuse projects. It is idempotent: re-run it af
 | http://localhost:3001 | Grafana: *LiteLLM - Live*, *LiteLLM - Cost* | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
 | http://localhost:9090 | Prometheus | – |
 
-Call it like OpenAI, with a team key from `.env`:
+Each app gets **its** team key: the `KEY_<TEAM>_<KEY>` line in `.env`, e.g.
+`KEY_SEARCH_CHATBOT_PROD` for the search team's chatbot. Never hand out `LITELLM_MASTER_KEY`.
+
+### Step 8: Call the gateway from an app
+
+The gateway speaks the OpenAI API, so any OpenAI SDK works. Set the base URL to
+`http://localhost:4000` and use a team key as the API key.
+
+PowerShell:
 
 ```powershell
 $key = (Select-String -Path .env -Pattern '^KEY_SEARCH_CHATBOT_PROD=(.*)').Matches[0].Groups[1].Value
@@ -61,12 +150,49 @@ Invoke-RestMethod http://localhost:4000/v1/chat/completions -Method Post `
   -Body '{"model":"gpt-oss-20b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+Python (`pip install openai`):
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:4000", api_key="<KEY_SEARCH_CHATBOT_PROD from .env>")
+chat = client.chat.completions.create(
+    model="gpt-oss-20b",
+    messages=[{"role": "user", "content": "hi"}],
+    extra_body={"metadata": {"session_id": "my-conversation-1"}},   # groups the trace in Langfuse
+)
+print(chat.choices[0].message.content)
+
+emb = client.embeddings.create(model="gemini-embedding-001", input="hello")
+print(len(emb.data[0].embedding))   # 3072
+```
+
+The call then shows up in the team's Langfuse project and in Grafana. `GET /v1/models` with the
+key lists the models that key may use.
+
+### Making changes later
+
+Every change goes the same way: edit the file, then run `.\run.ps1` again.
+
+| You want to... | Edit | Then run |
+|---|---|---|
+| add or replace a provider key | `.env` | `.\run.ps1` |
+| rotate a team key | change its `KEY_...` value in `.env` (any new `sk-...` value) | `.\run.ps1` (the old key stops working) |
+| add a team, a key, or change budgets / limits / models of a team | `config/teams.yaml` | `.\run.ps1` (new keys appear in `.env`) |
+| add a model | `config/models.yaml`, then list it in a team in `config/teams.yaml` | `.\run.ps1` |
+| change a port | `config/ports.yaml` | `.\run.ps1` |
+| add a hook (autorouter, compression, ...) | `gateway/hooks/<module>.py` + `config/hooks.yaml` ([docs/HOOKS.md](docs/HOOKS.md)) | `.\run.ps1`, then `.\run.ps1 test` |
+| stop the stack (data kept) | – | `.\run.ps1 down` |
+| start again | – | `.\run.ps1` |
+| delete everything, including all data | – | `.\run.ps1 compose down -v` (cannot be undone) |
+
 ## Project layout
 
 ```
 .
 ├── run.ps1 / run.sh        the runner: build + run end to end, test, provision, logs, down
 ├── .env.example            template of .env (ALL credentials; .env itself is git-ignored)
+├── requirements.txt        Python packages, only for working on the code locally (not needed to run)
 ├── compose.yaml            every service, network and volume
 ├── config/                 what you edit
 │   ├── stack.yaml          project name, bind address, replicas, retries, cache, image tags
@@ -252,7 +378,8 @@ Same commands with `./run.sh`.
 - Prometheus scrapes every replica
 - spend is booked per team
 
-**Last run (2026-11-25, LiteLLM 1.110.3 and 1.111.0, no provider keys set): 20 passed, 0 failed.** Provider
+**Last run (2026-11-25, LiteLLM 1.111.0, Groq + Gemini + OpenRouter keys set): 37 passed, 2 failed** - the two
+OpenRouter fallback models (the OpenRouter key was expired). Provider
 model calls are added to the test automatically once their keys are in `.env`.
 
 ## Security notes

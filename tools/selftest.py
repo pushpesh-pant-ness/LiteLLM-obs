@@ -17,6 +17,7 @@ Exit code 1 on any failure.
 import base64
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -83,9 +84,26 @@ def request(key, model, mode="chat", base=URL, text=None, session=None, headers_
         "max_tokens": 16, "metadata": md}, base=base, timeout=150, headers_out=headers_out)
 
 
+def delete_keys(aliases):
+    """Delete temporary keys that exist (deleting a missing alias makes LiteLLM log a 404 traceback)."""
+    if aliases:
+        call("POST", "/key/delete", MASTER, {"key_aliases": sorted(set(aliases))})
+
+
+def leftover_temp_keys():
+    """selftest-* keys left behind by an interrupted earlier run."""
+    out, page = [], 1
+    while True:
+        _, res = call("GET", f"/key/list?return_full_object=true&size=100&page={page}")
+        keys = res.get("keys", []) if isinstance(res, dict) else []
+        out += [k["key_alias"] for k in keys if isinstance(k, dict) and str(k.get("key_alias") or "").startswith("selftest-")]
+        if page >= int(res.get("total_pages") or 1) or not keys:
+            return out
+        page += 1
+
+
 def temp_key(alias, team_id=None, **limits):
     alias = f"selftest-{alias}"
-    call("POST", "/key/delete", MASTER, {"key_aliases": [alias]})
     body = {"key_alias": alias, "metadata": {"tags": ["proj:selftest", "cc:test", "env:test"]}, **limits}
     if team_id:
         body["team_id"] = team_id
@@ -118,6 +136,7 @@ def main():
     _, tl = call("GET", "/team/list")
     tl = tl if isinstance(tl, list) else tl.get("teams", [])
     ids = {t["team_alias"]: t["team_id"] for t in tl if t.get("team_alias")}
+    delete_keys(leftover_temp_keys())
 
     print("\n  -- gateway")
     for base in REPLICAS:
@@ -141,6 +160,7 @@ def main():
     check(f"x-gateway-hooks = {','.join(hooks)}", status == 200 and got == ",".join(hooks), f"HTTP {status}, header {got!r}")
 
     print("\n  -- teams")
+    tested_hidden = set()
     for t in teams:
         tid = ids.get(t["id"])
         if not tid:
@@ -154,11 +174,16 @@ def main():
                   status == 200 and got == sorted(t["models"]), f"HTTP {status}, got {got}")
         key = temp_key(f"{t['id']}-models", tid)
         for i, m in enumerate(t["models"]):
-            if m == MOCK or models.get(m, {}).get("hidden"):
+            if m == MOCK:
                 continue
+            if models.get(m, {}).get("hidden"):
+                if m in tested_hidden:      # fallback targets: one direct call each, not per team
+                    continue
+                tested_hidden.add(m)
             status, body = request(key, m, models[m]["mode"], base=REPLICAS[i % len(REPLICAS)])
             detail = "" if status == 200 else err(body)[:120]
-            check(f"{t['id']}: allowed {m:<24} -> 200", status == 200, detail)
+            label = "fallback" if models.get(m, {}).get("hidden") else "allowed "
+            check(f"{t['id']}: {label} {m:<24} -> 200", status == 200, detail)
         for m in served:
             if m in t["models"]:
                 continue
@@ -222,10 +247,24 @@ def main():
                   text[:100])
 
     print("\n  -- metrics (Prometheus)")
-    status, body = call("GET", "/api/v1/query?query=" + urllib.parse.quote('up{job="litellm"}'), base=PROM)
-    ups = [r["value"][1] for r in (body.get("data") or {}).get("result", [])] if status == 200 else []
-    check(f"Prometheus scrapes {len(REPLICAS)} replica(s)", len(ups) == len(REPLICAS) and all(v == "1" for v in ups),
-          f"up = {ups}")
+    # Match the replicas' CURRENT addresses: right after a restart Prometheus may still list an old
+    # address for up to one DNS refresh (30 s); that stale target is not a failure.
+    want = {}
+    for base in REPLICAS:
+        host = base.split("//")[1].split(":")[0]
+        try:
+            want[f"{socket.gethostbyname(host)}:{PORT}"] = host
+        except OSError:
+            want[f"?:{host}"] = host
+    up, start = {}, time.time()
+    while time.time() - start < 60:
+        status, body = call("GET", "/api/v1/query?query=" + urllib.parse.quote('up{job="litellm"}'), base=PROM)
+        up = {r["metric"].get("instance"): r["value"][1] for r in (body.get("data") or {}).get("result", [])} if status == 200 else {}
+        if all(up.get(i) == "1" for i in want):
+            break
+        time.sleep(10)
+    check(f"Prometheus scrapes all {len(REPLICAS)} replica(s)", all(up.get(i) == "1" for i in want),
+          ", ".join(f"{h} ({i}) up={up.get(i)}" for i, h in want.items()))
 
     print("\n  -- spend booked per team (spend buffer flushes in batches)")
     pending = {t["id"] for t in teams if t["id"] in ids}
@@ -244,8 +283,9 @@ def main():
 
 def finish():
     if created:
-        call("POST", "/key/delete", MASTER, {"key_aliases": created})
-        print(f"\n  temporary keys deleted: {len(created)}")
+        delete_keys(created)
+        print(f"\n  temporary keys deleted: {len(set(created))}")
+        created.clear()
     failed = results.count(False)
     print(f"\n  {len(results) - failed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
@@ -255,5 +295,4 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        if created and results is not None:
-            call("POST", "/key/delete", MASTER, {"key_aliases": created})
+        delete_keys(created)   # only if main() stopped early; finish() empties the list

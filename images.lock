@@ -1,4 +1,4 @@
-# image digests in use - written by run.ps1 2026-11-25T05:49:18Z
+# image digests in use - written by run.ps1 2026-11-25T06:01:26Z
 ghcr.io/berriai/litellm:latest  ghcr.io/berriai/litellm@sha256:ce00096d012719d58c52cecfa373f7c6256dd1b0ff08f6fa607e10e9628f1f46
 postgres:17  postgres@sha256:87c8b42f423b45d5247e6aa8fdb2e7762fec164c68a50fe3eb07e7bfcaf4dbcf
 redis:8  redis@sha256:ca1cb6df9313d0186b68f19b60fc2802e0c76e8542b2c05650b560e7bbb3cc8f
