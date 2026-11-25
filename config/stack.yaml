@@ -1,0 +1,53 @@
+# Stack settings. No secrets here: every credential lives in .env.
+# Edit, then re-run  .\run.ps1  (or ./run.sh). Related files in this folder:
+#   ports.yaml   fixed port of every service        models.yaml  model catalog
+#   teams.yaml   org, teams, budgets, team keys      hooks.yaml   request hook pipeline
+
+# Compose project name: prefix of every container and volume.
+project: llm-gateway
+
+server:
+  # 127.0.0.1 = this machine only. 0.0.0.0 = reachable from the network (put TLS in front).
+  bind: 127.0.0.1
+  # Host name people use in the browser (Langfuse login callback, Grafana links).
+  public_host: localhost
+
+litellm:
+  # Instances behind the shared state Redis (rate limits and budgets hold across all of them).
+  # Replica N is published on ports.litellm + N - 1.
+  replicas: 2
+  num_retries: 2            # retries of a failing provider call (other deployments first)
+  timeout_seconds: 120      # per provider call
+  allowed_fails: 3          # failures per minute before a deployment is cooled down
+  cooldown_seconds: 30
+
+# Response cache: a dedicated Redis (redis-cache), separate from the state Redis, so cache
+# pressure can never evict rate-limit counters or the spend buffer. Identical requests are
+# answered from the cache; the cache-isolation hook (hooks.yaml) keeps every team's entries apart.
+# Clients can skip it per request:  "cache": {"no-cache": true}
+cache:
+  enabled: true
+  ttl_seconds: 3600
+  max_memory: 256mb
+  call_types: [acompletion, aembedding, atext_completion]
+
+prometheus:
+  retention: 30d
+
+images:
+  # always  = pull every image on each run (latest patch of the tags below)
+  # missing = pull only images not yet on this machine
+  # never   = use only images already here (fails if one is missing)
+  pull: always
+  # Tags follow supported release lines, so `always` picks up their security patches. Digests in
+  # use are written to images.lock on every run (send it for the security review, then pin the
+  # versions here and switch to `missing` or `never`).
+  litellm: ghcr.io/berriai/litellm:latest          # tested: 1.111.0 (runs as non-root)
+  postgres: postgres:17
+  redis: redis:8
+  clickhouse: clickhouse/clickhouse-server:26.8    # LTS line
+  langfuse: langfuse/langfuse:3
+  langfuse_worker: langfuse/langfuse-worker:3
+  grafana: grafana/grafana:13.3.1
+  prometheus: prom/prometheus:v3.13.3              # LTS line
+  python: python:3.13-alpine                       # local-s3 blob store only

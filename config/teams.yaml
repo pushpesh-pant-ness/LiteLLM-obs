@@ -1,0 +1,71 @@
+# The organisation and its fixed teams. Applied on every run (or `run provision`):
+#   LiteLLM   one team per entry: allowed models, budget, rate limits, metadata (org, observability)
+#             one virtual key per `keys` entry, with the FIXED secret from .env (see below)
+#   Langfuse  one organisation (org below) with one project per team; each team's traces go to
+#             its own project (observability hook, hooks.yaml)
+#   Grafana   spend grouped by org / team / key / tags ("LiteLLM - Cost")
+#
+# Team keys: key `<team id>-<key name>` takes its secret from .env variable
+#   KEY_<TEAM ID>_<KEY NAME>   (upper case, "-" -> "_"),  e.g. KEY_SEARCH_CHATBOT_PROD
+# The runner adds a random sk-... value to .env for every new key, so all credentials stay in one
+# place. Change the value in .env and re-run to rotate a key (the old secret stops working).
+#
+# Safe to re-run. Nothing is deleted in LiteLLM or Langfuse when an entry is removed here
+# (it is reported); delete it in the UI if needed.
+#
+# Fields
+#   id            lowercase letters, digits, hyphens. LiteLLM team alias + Langfuse project name.
+#   models        public names from models.yaml (fallbacks and internal models are added for you)
+#   budget        max_usd per period ("1mo" resets on the 1st, UTC; "7d", "1d" also work)
+#   limits        team-wide rpm (requests/min) and tpm (tokens/min), across all replicas
+#   keys          name, budget_usd, budget_period, rpm, tpm, tags (spend reporting: proj:, cc:, env:)
+#   observability redact_content: true = prompts/answers are NOT sent to Langfuse (tokens, cost,
+#                 latency still are)
+
+org:
+  id: aixoffice
+  name: AIxOffice
+
+teams:
+  - id: search
+    name: Search
+    models: [gemini-3.6-flash, gemini-embedding-001, gpt-oss-120b, gpt-oss-20b]
+    budget: { max_usd: 500, period: 1mo }
+    limits: { rpm: 600, tpm: 2000000 }
+    keys:
+      - name: chatbot-prod
+        budget_usd: 400
+        rpm: 120
+        tpm: 200000
+        tags: [proj:chatbot, cc:1042, env:prod]
+      - name: chatbot-dev
+        budget_usd: 25
+        rpm: 20
+        tpm: 20000
+        tags: [proj:chatbot, cc:1042, env:dev]
+
+  - id: ranking
+    name: Ranking
+    models: [gemini-embedding-001, gpt-oss-20b, qwen3.8-27b]
+    budget: { max_usd: 200, period: 1mo }
+    limits: { rpm: 300, tpm: 1000000 }
+    keys:
+      - name: reranker-prod
+        budget_usd: 200
+        rpm: 120
+        tpm: 200000
+        tags: [proj:reranker, cc:1042, env:prod]
+
+  - id: contracts
+    name: Contracts (Legal)
+    models: [gemini-3.6-flash, qwen3.8-27b, gpt-oss-120b]
+    budget: { max_usd: 300, period: 1mo }
+    limits: { rpm: 120, tpm: 500000 }
+    observability:
+      redact_content: true          # legal documents never leave the gateway in traces
+    keys:
+      - name: reviewer-prod
+        budget_usd: 300
+        rpm: 60
+        tpm: 100000
+        tags: [proj:reviewer, cc:2210, env:prod]

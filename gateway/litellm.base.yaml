@@ -1,0 +1,50 @@
+# LiteLLM proxy settings - the part that does not change per deployment.
+# Docs: https://docs.litellm.ai/docs/proxy/configs
+#
+# The runner (tools/render.py) builds .build/litellm.yaml from this file plus:
+#   model_list                     <- config/models.yaml (only providers with a key in .env)
+#   router_settings.fallbacks      <- config/models.yaml  `fallbacks`
+#   router_settings retries/...    <- config/stack.yaml   `litellm`
+#   litellm_settings.cache*        <- config/stack.yaml   `cache`
+#   litellm_settings.callbacks...  <- config/hooks.yaml   (hook pipeline + integrations hooks need)
+# Every host / port / secret is an os.environ/ reference: values come from config/ports.yaml and
+# .env through compose.yaml. Do not put secrets here.
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Admin UI sign-in throttling. [] = clients connect directly. Behind a TLS proxy / load
+  # balancer, list its address range so LiteLLM trusts its X-Forwarded-For.
+  trusted_proxy_ranges: []
+
+  # ---- Postgres (gateway DB)
+  database_url: os.environ/DATABASE_URL
+  database_connection_pool_limit: 20       # per replica
+  maximum_spend_logs_retention_period: "30d"
+  maximum_spend_logs_retention_interval: "1d"
+  # Prompts / answers are NOT stored in the spend logs (Langfuse holds them; Grafana never sees them).
+  store_prompts_in_spend_logs: false
+
+  # ---- state Redis (shared by every replica)
+  # Queue spend updates in Redis so replicas don't fight over the same DB rows.
+  use_redis_transaction_buffer: true
+  # Cross-replica coordination: rate-limit counters, budgets between DB writes, spend buffer,
+  # pod lock, shared health checks. The response cache uses its OWN Redis (litellm_settings.cache).
+  coordination_redis:
+    host: os.environ/REDIS_STATE_HOST
+    port: os.environ/REDIS_STATE_PORT
+    password: os.environ/REDIS_STATE_PASSWORD
+
+router_settings:
+  # Same state Redis for the router: rpm/tpm and cooldowns counted once across all replicas.
+  redis_host: os.environ/REDIS_STATE_HOST
+  redis_port: os.environ/REDIS_STATE_PORT
+  redis_password: os.environ/REDIS_STATE_PASSWORD
+
+litellm_settings:
+  # Keep Prometheus label cardinality low: no per-user / per-request labels.
+  disable_end_user_cost_tracking_prometheus_only: true
+  prometheus_exclude_labels: ["client_ip", "user_agent", "user_email", "end_user", "user", "hashed_api_key"]
+  disable_add_user_agent_to_request_tags: true
+  # false = prompt / answer text goes to Langfuse (per-team redaction: observability hook).
+  turn_off_message_logging: false
+  drop_params: true          # ignore OpenAI params a provider does not support instead of failing

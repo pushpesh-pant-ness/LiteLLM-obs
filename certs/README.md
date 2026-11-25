@@ -1,18 +1,23 @@
-# Corporate TLS inspection certificates
+# certs/ - corporate TLS inspection
 
-If your network re-signs HTTPS (Netskope, Zscaler, ...), containers fail outbound calls with
-"certificate signed by unknown authority". Put the company root CA here as `corp-root-ca.pem`
-(PEM, public certificate only - never a private key), then run `scripts/build-ca-bundle.sh`.
+If the network re-signs HTTPS (Netskope here), LiteLLM's calls to the LLM providers fail with
+"certificate verify failed" unless it trusts the re-signing CA. Public certificates only - never a
+private key (`build_ca_bundle.py` refuses one).
 
-- `corp-root-ca.pem`         - the corporate root (Langfuse via NODE_EXTRA_CA_CERTS; Go services via SSL_CERT_DIR)
-- `corp-intermediate-ca.pem` - the Netskope tenant intermediate (`ca.ness.goskope.com`); fetched by the
-  script if missing, and only accepted if it verifies against the root
-- `ca-bundle.pem`            - public CAs + root + intermediate (LiteLLM via SSL_CERT_FILE)
+| File | What | Who makes it |
+|---|---|---|
+| `corp-root-ca.pem` | Corporate (Netskope) root CA | you - export it from the Windows trust store (see `tools/fetch-intermediate.sh`) |
+| `corp-intermediate-ca.pem` | Netskope tenant intermediate (`ca.ness.goskope.com`) | `tools/fetch-intermediate.sh`, only if it verifies against the root |
+| `ca-bundle.pem` | public CAs of the running LiteLLM image + root + intermediate | the runner, on **every** run, when `corp-root-ca.pem` exists |
 
-Why the intermediate: LiteLLM runs Python 3.13, which verifies in X509-strict mode and rejects the
-Netskope root (`CA cert does not include key usage extension`). The intermediate has keyUsage, and
-Python 3.13 lets a chain end at any trusted certificate, so with it in the bundle verification
-succeeds with strict mode and hostname checks still on. Nothing is relaxed.
+LiteLLM uses the bundle via `SSL_CERT_FILE`. With no `corp-root-ca.pem` here, LiteLLM uses the
+image's own CA list (right for networks without TLS inspection). Langfuse, Grafana and Prometheus
+make no outbound calls in this stack, so they need nothing.
 
-All are git-ignored (they are network-specific). With no files here, every service uses its normal public CA list.
-If the network's CA changes, delete `corp-intermediate-ca.pem`, rerun the script and `docker compose restart litellm`.
+Why the intermediate: LiteLLM's Python 3.13 verifies in X509-strict mode and rejects the Netskope
+root (`CA cert does not include key usage extension`). The intermediate has keyUsage and a chain may
+end at any trusted certificate, so verification passes with strict mode and hostname checks still on.
+
+If the network's CA changes: replace `corp-root-ca.pem`, delete `corp-intermediate-ca.pem`, run
+`./tools/fetch-intermediate.sh` (Git Bash), then the runner. The `*.pem` files are git-ignored
+(network-specific): copy this folder along when moving the stack to another machine.

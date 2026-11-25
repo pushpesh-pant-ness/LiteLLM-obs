@@ -1,0 +1,2 @@
+# Alert rules / contact points / policies go here (Grafana file provisioning). Empty on purpose.
+apiVersion: 1

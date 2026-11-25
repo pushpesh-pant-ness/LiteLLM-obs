@@ -1,0 +1,23 @@
+# Prometheus scrape config TEMPLATE. The runner fills {{PORT_*}} from config/ports.yaml and writes
+# .build/prometheus.yml (what Prometheus loads). Edit this file, not the generated one.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: litellm
+    metrics_path: /metrics/
+    # Metrics-only LiteLLM key created by the provision step (never the master key).
+    authorization:
+      type: Bearer
+      credentials_file: /prom-secrets/litellm_metrics_token
+    # Every LiteLLM replica: Docker DNS returns one A record per instance.
+    dns_sd_configs:
+      - names: ["litellm"]
+        type: A
+        port: {{PORT_LITELLM}}
+        refresh_interval: 30s
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:{{PORT_PROMETHEUS}}"]

@@ -1,0 +1,24 @@
+# Port map: one fixed port per service, used everywhere (inside the Docker network AND, for the
+# published ones, on the host). The runner turns this into PORT_* variables that
+# compose.yaml, the generated LiteLLM config, Prometheus and Grafana all read - so LiteLLM always
+# reaches Postgres / Redis / Langfuse on the ports listed here.
+#
+# Change a number, re-run the runner. Every port must be unique.
+
+ports:
+  # ---- published on server.bind (stack.yaml) - what people and apps connect to
+  litellm: 4000            # OpenAI-compatible API + admin UI. Replica N: 4000 + N - 1
+  langfuse: 3000           # traces UI + ingestion API
+  grafana: 3001            # dashboards
+  prometheus: 9090         # metrics
+
+  # ---- internal only (Docker network "internal": no host port, no internet)
+  postgres: 5432           # gateway DB: keys, teams, budgets, spend logs
+  redis_state: 6379        # LiteLLM shared state: rate limits, budgets, cooldowns, spend buffer
+  redis_cache: 6380        # LiteLLM response cache
+  langfuse_db: 5433        # Langfuse Postgres
+  langfuse_redis: 6381     # Langfuse queue
+  langfuse_worker: 3030    # Langfuse background worker
+  local_s3: 9100           # Langfuse blob store (S3-compatible, local volume)
+  clickhouse_http: 8123    # Langfuse analytics store - fixed by the ClickHouse image
+  clickhouse_native: 9000  # fixed by the ClickHouse image

@@ -1,0 +1,98 @@
+# Model catalog: the public model names apps call, and the provider route(s) behind each.
+#
+# A deployment is added to LiteLLM only when its provider's credential (in .env) is set; models
+# without any usable deployment are skipped with a warning, and dropped from the teams that list
+# them, so the stack still starts. Add the key to .env, re-run the runner, and they appear.
+#
+# Fields
+#   name          public model name (what apps send as "model"; what teams.yaml lists)
+#   mode          chat | embedding
+#   fallbacks     other model names tried, in order, when every deployment of this one fails.
+#                 Teams allowed this model are automatically allowed its fallbacks too.
+#   hidden        true = not meant to be called directly (fallback target only); never listed
+#                 in teams.yaml, granted only through `fallbacks`.
+#   internal      true = granted to EVERY team (used by `run test`; free mock answer)
+#   deployments   provider: a key of `providers` below
+#                 model:    LiteLLM route (<provider>/<provider model id>)
+#                 input_cost_per_token / output_cost_per_token: price override, for routes that
+#                 are not in LiteLLM's bundled price list (otherwise spend would count as $0)
+#                 any other key is passed to LiteLLM's litellm_params as is
+
+providers:
+  groq:
+    credential: GROQ_API_KEY
+  gemini:
+    credential: GEMINI_API_KEY
+  openrouter:
+    credential: OPENROUTER_API_KEY
+  mock:
+    credential: null            # canned answers, no provider call
+
+models:
+  # ---------------------------------------------------------------- Gemini
+  - name: gemini-3.6-flash
+    mode: chat
+    deployments:
+      - provider: gemini
+        model: gemini/gemini-3.6-flash
+
+  - name: gemini-embedding-001
+    mode: embedding
+    deployments:
+      - provider: gemini
+        model: gemini/gemini-embedding-001
+
+  # ---------------------------------------------------------------- Groq (OpenRouter as fallback)
+  - name: gpt-oss-120b
+    mode: chat
+    fallbacks: [gpt-oss-120b-openrouter]
+    deployments:
+      - provider: groq
+        model: groq/openai/gpt-oss-120b
+
+  - name: gpt-oss-20b
+    mode: chat
+    fallbacks: [gpt-oss-20b-openrouter]
+    deployments:
+      - provider: groq
+        model: groq/openai/gpt-oss-20b
+
+  - name: qwen3.8-27b
+    mode: chat
+    deployments:
+      - provider: groq
+        model: groq/qwen/qwen3.8-27b
+
+  # ---------------------------------------------------------------- OpenRouter
+  # Same open-weight models through OpenRouter: used when Groq fails or is rate limited.
+  # OpenRouter routes are not in LiteLLM's bundled price list; prices below = Groq list price
+  # (check openrouter.ai/models and adjust).
+  - name: gpt-oss-120b-openrouter
+    mode: chat
+    hidden: true
+    deployments:
+      - provider: openrouter
+        model: openrouter/openai/gpt-oss-120b
+        input_cost_per_token: 1.5e-07
+        output_cost_per_token: 6.0e-07
+
+  - name: gpt-oss-20b-openrouter
+    mode: chat
+    hidden: true
+    deployments:
+      - provider: openrouter
+        model: openrouter/openai/gpt-oss-20b
+        input_cost_per_token: 7.5e-08
+        output_cost_per_token: 3.0e-07
+
+  # ---------------------------------------------------------------- internal
+  # Free mock (priced like gpt-4o-mini): smoke-tests keys, limits, cache, hooks, Langfuse,
+  # Prometheus and spend booking end to end without a provider key.
+  - name: selftest-mock
+    mode: chat
+    internal: true
+    deployments:
+      - provider: mock
+        model: openai/gpt-4o-mini
+        api_key: not-used
+        mock_response: "pong (mock answer from the gateway self-test model)"

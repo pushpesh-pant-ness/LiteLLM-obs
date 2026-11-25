@@ -1,0 +1,452 @@
+# LLM gateway: LiteLLM + hooks + Redis (state, cache) + Postgres, observed by Langfuse,
+# Prometheus and Grafana. Start it with the runner, not `docker compose up`:
+#   .\run.ps1   |   ./run.sh        (renders .build/ from config/ + .env first)
+# Afterwards:  .\run.ps1 compose ps | logs <svc> | ...   (passes the generated env file)
+#
+#   Apps -> litellm x N ----------------------------------------------------> LLM providers
+#             | hook pipeline (gateway/hooks): observability, cache-isolation, ...
+#             |- postgres      keys, teams, budgets, spend logs        --> Grafana "Cost"
+#             |- redis-state   limits, budgets, cooldowns, spend buffer (shared by replicas)
+#             |- redis-cache   response cache (per-team namespaces)
+#             |- prometheus    metrics                                 --> Grafana "Live"
+#             '- langfuse-web  traces, one project per team (+ worker, langfuse-db, clickhouse,
+#                              langfuse-redis, local-s3)
+#   Networks: edge = published / needs internet   internal = databases & queues (no internet)
+#   Every port: config/ports.yaml -> PORT_* variables (.build/compose.env).
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:${PORT_LANGFUSE_DB}/langfuse
+  SALT: ${LANGFUSE_SALT}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:${PORT_CLICKHOUSE_NATIVE}
+  CLICKHOUSE_URL: http://clickhouse:${PORT_CLICKHOUSE_HTTP}
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # Blob store: the bundled local-s3 service (files on the s3-data volume, no cloud storage).
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LOCAL_S3_ACCESS_KEY}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LOCAL_S3_SECRET_KEY}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://local-s3:${PORT_LOCAL_S3}
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LOCAL_S3_ACCESS_KEY}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LOCAL_S3_SECRET_KEY}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://local-s3:${PORT_LOCAL_S3}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: "${PORT_LANGFUSE_REDIS}"
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+
+x-langfuse-deps: &langfuse-deps
+  langfuse-db: { condition: service_healthy }
+  clickhouse: { condition: service_healthy }
+  langfuse-redis: { condition: service_healthy }
+  local-s3: { condition: service_healthy }
+
+# One-shot tools (profile "tools", never started by `up`): run.ps1 provision | test
+x-tool: &tool
+  logging: *logging
+  mem_limit: 256m
+  networks: [edge]
+  image: ${IMG_LITELLM}
+  pull_policy: ${PULL_POLICY:-missing}
+  profiles: ["tools"]
+  restart: "no"
+  # LiteLLM images from 1.111 run as non-root (65532), which cannot write to bind mounts on
+  # Docker Desktop. These one-shots write .state/ and the metrics token, so they run as root.
+  user: "0:0"
+  env_file: [.env]
+  environment: &tool-env
+    LITELLM_URL: http://litellm:${PORT_LITELLM}
+    LANGFUSE_URL: http://langfuse-web:${PORT_LANGFUSE}
+    PROMETHEUS_URL: http://prometheus:${PORT_PROMETHEUS}
+    PROJECT: ${COMPOSE_PROJECT_NAME}
+    REPLICAS: ${LITELLM_REPLICAS:-2}
+    PORT_LITELLM: ${PORT_LITELLM}
+  depends_on:
+    litellm: { condition: service_healthy }
+
+services:
+  # ================================================================ gateway
+  litellm:
+    logging: *logging
+    deploy:
+      replicas: ${LITELLM_REPLICAS:-2}
+    mem_limit: 1536m
+    networks: [edge, internal]
+    image: ${IMG_LITELLM}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "${PORT_LITELLM}"]
+    env_file: [.build/litellm.env]          # provider credentials only
+    environment:
+      SSL_CERT_FILE: ${LITELLM_CA_FILE}
+      DATABASE_URL: postgresql://litellm:${LITELLM_DB_PASSWORD}@postgres:${PORT_POSTGRES}/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      UI_USERNAME: ${LITELLM_UI_USERNAME}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD}
+      STORE_MODEL_IN_DB: "True"             # models / credentials added in the UI are saved too
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"  # bundled price list (no download through the proxy)
+      REDIS_STATE_PASSWORD: ${REDIS_STATE_PASSWORD}
+      REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD}
+      LANGFUSE_HOST: http://langfuse-web:${PORT_LANGFUSE}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      GATEWAY_HOOKS_FILE: /etc/litellm/hooks.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./.build/litellm.yaml:/etc/litellm/config.yaml:ro
+      - ./.build/hooks.json:/etc/litellm/hooks.json:ro
+      - ./gateway:/etc/litellm/gateway:ro
+      - ./certs:/certs:ro
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT_LITELLM}-${PORT_LITELLM_LAST}:${PORT_LITELLM}"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis-state: { condition: service_healthy }
+      redis-cache: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${PORT_LITELLM}/health/liveliness')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  postgres:
+    logging: *logging
+    mem_limit: 1g
+    networks: [internal]
+    image: ${IMG_POSTGRES}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      PGPORT: "${PORT_POSTGRES}"            # server, init scripts and pg_isready all use it
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      LITELLM_DB_PASSWORD: ${LITELLM_DB_PASSWORD}
+      GRAFANA_RO_DB_PASSWORD: ${GRAFANA_RO_DB_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./services/postgres/init:/docker-entrypoint-initdb.d:ro
+    # No host port. Admin: .\run.ps1 compose exec postgres psql -U postgres -d litellm
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Shared state of all replicas. AOF = survives restarts. volatile-lru: only keys with a TTL
+  # are ever evicted, so the spend buffer is never dropped.
+  redis-state:
+    logging: *logging
+    mem_limit: 384m
+    networks: [internal]
+    image: ${IMG_REDIS}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_STATE_PASSWORD}
+      REDIS_PORT: "${PORT_REDIS_STATE}"
+    command:
+      - sh
+      - -c
+      - exec redis-server --port "$$REDIS_PORT" --requirepass "$$REDIS_PASSWORD" --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy volatile-lru
+    volumes:
+      - redis-state-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli -p \"$$REDIS_PORT\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # Response cache. Pure cache: LRU eviction, no persistence (a restart just starts cold).
+  redis-cache:
+    logging: *logging
+    mem_limit: 512m
+    networks: [internal]
+    image: ${IMG_REDIS}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_CACHE_PASSWORD}
+      REDIS_PORT: "${PORT_REDIS_CACHE}"
+      REDIS_MAXMEMORY: ${REDIS_CACHE_MAXMEMORY:-256mb}
+    command:
+      - sh
+      - -c
+      - exec redis-server --port "$$REDIS_PORT" --requirepass "$$REDIS_PASSWORD" --save "" --appendonly no --maxmemory "$$REDIS_MAXMEMORY" --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli -p \"$$REDIS_PORT\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # One-shot on every `up`: reporting views + read-only grants for Grafana, after LiteLLM has
+  # created its tables.
+  db-setup:
+    logging: *logging
+    mem_limit: 256m
+    networks: [internal]
+    image: ${IMG_POSTGRES}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: "${PORT_POSTGRES}"
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: litellm
+      PGAPPNAME: gateway-db-setup
+      GRAFANA_RO_DB_PASSWORD: ${GRAFANA_RO_DB_PASSWORD}
+    volumes:
+      - ./services/postgres/sql:/sql:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /sql/*.sql; do
+          echo "db-setup: $$f"
+          psql -v ON_ERROR_STOP=1 -q -v ro_pw="$$GRAFANA_RO_DB_PASSWORD" -f "$$f"
+        done
+    depends_on:
+      litellm: { condition: service_healthy }
+
+  # config/teams.yaml + hooks -> LiteLLM teams, keys, Langfuse projects, metrics key.
+  provision:
+    <<: *tool
+    volumes:
+      - ./config:/w/config:ro
+      - ./gateway:/w/gateway:ro
+      - ./tools:/w/tools:ro
+      - ./.build:/w/.build:ro
+      - ./.state:/w/.state                  # Langfuse team project keys (git-ignored)
+      - prom-secrets:/prom-secrets
+    entrypoint: ["python", "-I", "-u", "/w/tools/provision.py"]
+
+  # End-to-end self-test (temporary keys only).
+  selftest:
+    <<: *tool
+    volumes:
+      - ./.build:/w/.build:ro
+      - ./.state:/w/.state:ro
+      - ./tools:/w/tools:ro
+    entrypoint: ["python", "-I", "-u", "/w/tools/selftest.py"]
+
+  # ================================================================ metrics
+  prometheus:
+    logging: *logging
+    mem_limit: 1g
+    networks: [edge]
+    image: ${IMG_PROMETHEUS}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=:${PORT_PROMETHEUS}
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+      - --web.enable-lifecycle
+      # First value of every new series counts in increase()/rate() (LiteLLM exposes *_created).
+      - --enable-feature=created-timestamp-zero-ingestion
+    volumes:
+      - ./.build/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-secrets:/prom-secrets:ro
+      - prom-data:/prometheus
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT_PROMETHEUS}:${PORT_PROMETHEUS}"]
+
+  grafana:
+    logging: *logging
+    mem_limit: 512m
+    networks: [edge, internal]
+    image: ${IMG_GRAFANA}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_PORT: "${PORT_GRAFANA}"
+      GF_SERVER_ROOT_URL: ${GRAFANA_PUBLIC_URL}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # Grafana 12+ downloads "preinstalled" app plugins from grafana.com on start: not used here,
+      # and blocked by TLS inspection anyway.
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_SECURITY_X_XSS_PROTECTION: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/litellm-live.json
+      # read by provisioning/datasources/datasources.yml
+      PORT_PROMETHEUS: "${PORT_PROMETHEUS}"
+      PORT_POSTGRES: "${PORT_POSTGRES}"
+      GRAFANA_RO_DB_PASSWORD: ${GRAFANA_RO_DB_PASSWORD}
+    volumes:
+      - ./services/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./.build/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT_GRAFANA}:${PORT_GRAFANA}"]
+    depends_on:
+      prometheus: { condition: service_started }
+      db-setup: { condition: service_completed_successfully }
+
+  # ================================================================ traces (Langfuse v3)
+  langfuse-web:
+    logging: *logging
+    mem_limit: 2g
+    networks: [edge, internal]
+    image: ${IMG_LANGFUSE}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      <<: *langfuse-env
+      HOSTNAME: 0.0.0.0            # listen on all interfaces (two networks)
+      PORT: "${PORT_LANGFUSE}"
+      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      AUTH_DISABLE_SIGNUP: "true"
+      # Headless init: the org of config/teams.yaml, the default project (traffic without a team)
+      # with the keys from .env, and the admin user. Team projects: provision step.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_DEFAULT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_DEFAULT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_ADMIN_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_ADMIN_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_ADMIN_PASSWORD}
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT_LANGFUSE}:${PORT_LANGFUSE}"]
+    depends_on: *langfuse-deps
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:${PORT_LANGFUSE}/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  langfuse-worker:
+    logging: *logging
+    mem_limit: 1g
+    networks: [internal]
+    image: ${IMG_LANGFUSE_WORKER}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      <<: *langfuse-env
+      PORT: "${PORT_LANGFUSE_WORKER}"
+    depends_on: *langfuse-deps
+
+  # Langfuse's own Postgres: trace load never slows down the gateway DB.
+  langfuse-db:
+    logging: *logging
+    mem_limit: 512m
+    networks: [internal]
+    image: ${IMG_POSTGRES}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      PGPORT: "${PORT_LANGFUSE_DB}"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      LANGFUSE_DB_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+    volumes:
+      - lf-pg-data:/var/lib/postgresql/data
+      - ./services/postgres/langfuse-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Langfuse queue. Langfuse requires noeviction.
+  langfuse-redis:
+    logging: *logging
+    mem_limit: 512m
+    networks: [internal]
+    image: ${IMG_REDIS}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${LANGFUSE_REDIS_PASSWORD}
+      REDIS_PORT: "${PORT_LANGFUSE_REDIS}"
+    command:
+      - sh
+      - -c
+      - exec redis-server --port "$$REDIS_PORT" --requirepass "$$REDIS_PASSWORD" --maxmemory-policy noeviction
+    volumes:
+      - lf-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli -p \"$$REDIS_PORT\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  clickhouse:
+    logging: *logging
+    mem_limit: 2g
+    networks: [internal]
+    image: ${IMG_CLICKHOUSE}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      - ch-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user clickhouse --password \"$$CLICKHOUSE_PASSWORD\" -q 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # S3-compatible blob store on a local volume (stdlib Python, services/local-s3). No host port.
+  local-s3:
+    logging: *logging
+    mem_limit: 256m
+    networks: [internal]
+    image: ${IMG_PYTHON}
+    pull_policy: ${PULL_POLICY:-missing}
+    restart: unless-stopped
+    environment:
+      S3_ACCESS_KEY_ID: ${LOCAL_S3_ACCESS_KEY}
+      S3_BUCKETS: langfuse
+      S3_DATA_DIR: /data
+      S3_PORT: "${PORT_LOCAL_S3}"
+    volumes:
+      - ./services/local-s3/local_s3.py:/app/local_s3.py:ro
+      - s3-data:/data
+    command: ["python", "-I", "-u", "/app/local_s3.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', ${PORT_LOCAL_S3}), 2)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pg-data:
+  redis-state-data:
+  prom-data:
+  prom-secrets:
+  grafana-data:
+  lf-pg-data:
+  lf-redis-data:
+  ch-data:
+  ch-logs:
+  s3-data:
+
+networks:
+  edge: {}
+  internal:
+    internal: true

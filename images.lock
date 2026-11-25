@@ -1,0 +1,10 @@
+# image digests in use - written by run.ps1 2026-11-25T05:49:18Z
+ghcr.io/berriai/litellm:latest  ghcr.io/berriai/litellm@sha256:ce00096d012719d58c52cecfa373f7c6256dd1b0ff08f6fa607e10e9628f1f46
+postgres:17  postgres@sha256:87c8b42f423b45d5247e6aa8fdb2e7762fec164c68a50fe3eb07e7bfcaf4dbcf
+redis:8  redis@sha256:ca1cb6df9313d0186b68f19b60fc2802e0c76e8542b2c05650b560e7bbb3cc8f
+clickhouse/clickhouse-server:26.8  clickhouse/clickhouse-server@sha256:e49863ded96abdc0545bcd0320c1b99c979c18f27915eb6519a5546760d24cb9
+langfuse/langfuse:3  langfuse/langfuse@sha256:314f4d79d6761299e4299dc646943f01bfabbc1daff286ab818245549aa5e9d6
+langfuse/langfuse-worker:3  langfuse/langfuse-worker@sha256:02c87eda9a9c6be5b3bf9a78041db86f06bad568d9dd434be3b3c1159f8d0579
+grafana/grafana:13.3.1  grafana/grafana@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+prom/prometheus:v3.13.3  prom/prometheus@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+python:3.13-alpine  python@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e

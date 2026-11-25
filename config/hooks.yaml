@@ -1,0 +1,52 @@
+# Hook pipeline: Python hooks that run inside every LiteLLM replica, in the order listed, on every
+# request. Observability is the first hook; routing, compression, guardrails etc. plug in the
+# same way - write gateway/hooks/<module>.py (copy gateway/hooks/_template.py), add an entry here,
+# re-run the runner. No other file changes. See docs/HOOKS.md.
+#
+# Fields
+#   name        unique label (logs, x-gateway-hooks response header)
+#   module      file in gateway/hooks/ (without .py) that defines `HOOK = <your Hook class>`
+#   enabled     false = not loaded at all
+#   fail_open   true  = an error inside the hook is logged and the request continues
+#               false = an error rejects the request (use for guardrails / policy hooks)
+#   litellm     optional: LiteLLM built-in integrations this hook needs, merged into
+#               litellm_settings of the generated LiteLLM config (lists are combined)
+#   settings    free-form, passed to the hook's constructor
+
+hooks:
+  # Prometheus metrics + Langfuse traces. Per request: team / org / key tags, trace name and
+  # user, prompt redaction for teams with observability.redact_content, one JSON log line.
+  # At provisioning: a Langfuse project per team, and each team's traces routed to it.
+  - name: observability
+    module: observability
+    enabled: true
+    fail_open: true
+    litellm:
+      callbacks: [prometheus]
+      success_callback: [langfuse]
+      failure_callback: [langfuse]
+    settings:
+      per_team_projects: true     # false = every trace goes to the default Langfuse project
+      tag_requests: true          # adds team:<id>, org:<id> tags (Langfuse, spend tags)
+      log_requests: true          # one JSON line per request on stdout (no prompt text)
+
+  # Keeps cached responses per team: identical prompts from two teams never share a cache entry.
+  - name: cache-isolation
+    module: cache_isolation
+    enabled: true
+    fail_open: false              # never serve another team's cached answer
+    settings:
+      scope: team                 # team | key | global
+
+  # ---- examples of hooks to add later (modules not written yet)
+  # - name: autorouter            # pick the model per request (cost / latency / prompt size)
+  #   module: autorouter
+  #   enabled: false
+  #   fail_open: true
+  #   settings: { default: gpt-oss-20b, long_prompt: gemini-3.6-flash, long_prompt_tokens: 8000 }
+  #
+  # - name: prompt-compression    # shrink long prompts before they reach the provider
+  #   module: prompt_compression
+  #   enabled: false
+  #   fail_open: true
+  #   settings: { min_tokens: 4000, target_ratio: 0.5 }

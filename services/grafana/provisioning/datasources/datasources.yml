@@ -1,0 +1,28 @@
+apiVersion: 1
+
+# Ports come from config/ports.yaml (PORT_* environment variables set in compose.yaml).
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:${PORT_PROMETHEUS}
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+
+  # Read-only role grafana_ro: may read the `reporting` views only (services/postgres/sql/),
+  # never LiteLLM's tables, keys or prompt text. 30 s statement timeout, read-only transactions.
+  - name: LiteLLM Postgres
+    uid: litellm-pg
+    type: grafana-postgresql-datasource
+    url: postgres:${PORT_POSTGRES}
+    user: grafana_ro
+    jsonData:
+      database: litellm
+      sslmode: disable          # internal Docker network only
+      postgresVersion: 1700
+      timescaledb: false
+      maxOpenConns: 5
+    secureJsonData:
+      password: ${GRAFANA_RO_DB_PASSWORD}
